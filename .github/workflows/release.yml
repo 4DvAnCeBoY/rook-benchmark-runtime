@@ -219,6 +219,7 @@ jobs:
         with:
           name: rook-benchmark-runtime-${{ github.run_id }}-${{ github.run_attempt }}
           path: .image-release
+          include-hidden-files: true
           if-no-files-found: error
           retention-days: 90
 
