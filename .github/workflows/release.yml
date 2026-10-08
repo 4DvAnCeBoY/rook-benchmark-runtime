@@ -57,8 +57,7 @@ jobs:
           git_head="$(jq -er '.rook.npm_git_head' runtime.json)"
           build_env="$(jq -er '.rook.build_environment' runtime.json)"
           test "$package" = "@testmuai/rook"
-          test "$(node -p \"require('./package-lock.json').packages['node_modules/@testmuai/rook'].version\")" = "$version"
-          test "$(node -p \"require('./package-lock.json').packages['node_modules/@testmuai/rook'].integrity\")" = "$integrity"
+          VERSION="$version" INTEGRITY="$integrity" node -e 'const p=require("./package-lock.json").packages["node_modules/@testmuai/rook"]; if(p.version!==process.env.VERSION||p.integrity!==process.env.INTEGRITY) process.exit(1)'
           [[ "$git_head" =~ ^[0-9a-f]{40}$ ]]
           [[ "$build_env" =~ ^(stage|prod)$ ]]
           owner="${GITHUB_REPOSITORY_OWNER,,}"
