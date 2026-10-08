@@ -118,6 +118,12 @@ jobs:
           {
             echo "digest=$digest"
             echo "reference=$reference"
+            for architecture in amd64 arm64; do
+              child_digest="$(jq -er --arg architecture "$architecture" '.manifests[] | select(.platform.os == "linux" and .platform.architecture == $architecture) | .digest' .image-release/image-index.json)"
+              [[ "$child_digest" =~ ^sha256:[0-9a-f]{64}$ ]]
+              echo "${architecture}_digest=$child_digest"
+              echo "${architecture}_reference=$IMAGE_NAME@$child_digest"
+            done
           } >> "$GITHUB_OUTPUT"
 
       - name: Verify pulled image identity
@@ -141,15 +147,40 @@ jobs:
             test "$(docker run --rm --platform "$platform" --network none --read-only --tmpfs /tmp "$child_reference" --version)" = "$ROOK_VERSION"
           done
 
-      - name: Generate SPDX SBOM
+      - name: Generate linux/amd64 SPDX SBOM
         uses: anchore/sbom-action@e22c389904149dbc22b58101806040fa8d37a610 # v0.24.3
         with:
-          image: ${{ steps.image.outputs.reference }}
+          image: ${{ steps.image.outputs.amd64_reference }}
           format: spdx-json
-          output-file: .image-release/rook-image.spdx.json
+          output-file: .image-release/rook-image-linux-amd64.spdx.json
           upload-artifact: false
           upload-release-assets: false
           dependency-snapshot: false
+
+      - name: Generate linux/arm64 SPDX SBOM
+        uses: anchore/sbom-action@e22c389904149dbc22b58101806040fa8d37a610 # v0.24.3
+        with:
+          image: ${{ steps.image.outputs.arm64_reference }}
+          format: spdx-json
+          output-file: .image-release/rook-image-linux-arm64.spdx.json
+          upload-artifact: false
+          upload-release-assets: false
+          dependency-snapshot: false
+
+      - name: Validate platform-specific SBOM coverage
+        run: |
+          set -euo pipefail
+          node --input-type=module <<'NODE'
+          import { readFileSync } from "node:fs";
+          for (const [architecture, packageName] of [["amd64", "@testmuai/rook-node-linux-x64"], ["arm64", "@testmuai/rook-node-linux-arm64"]]) {
+            const path = `.image-release/rook-image-linux-${architecture}.spdx.json`;
+            const sbom = JSON.parse(readFileSync(path, "utf8"));
+            const names = new Set((sbom.packages ?? []).map(({ name }) => name));
+            if (sbom.spdxVersion !== "SPDX-2.3" || !names.has("@testmuai/rook") || !names.has(packageName)) {
+              throw new Error(`${path} does not describe the ${architecture} ROOK runtime`);
+            }
+          }
+          NODE
 
       - name: Create provenance attestation
         id: provenance
@@ -160,13 +191,23 @@ jobs:
           push-to-registry: true
           create-storage-record: false
 
-      - name: Create SBOM attestation
-        id: sbom-attestation
+      - name: Create linux/amd64 SBOM attestation
+        id: sbom-amd64-attestation
         uses: actions/attest@1e69f48acb82d1966a394da916b4c1698aa569d6 # v4.2.2
         with:
           subject-name: ${{ steps.source.outputs.image_name }}
-          subject-digest: ${{ steps.image.outputs.digest }}
-          sbom-path: .image-release/rook-image.spdx.json
+          subject-digest: ${{ steps.image.outputs.amd64_digest }}
+          sbom-path: .image-release/rook-image-linux-amd64.spdx.json
+          push-to-registry: true
+          create-storage-record: false
+
+      - name: Create linux/arm64 SBOM attestation
+        id: sbom-arm64-attestation
+        uses: actions/attest@1e69f48acb82d1966a394da916b4c1698aa569d6 # v4.2.2
+        with:
+          subject-name: ${{ steps.source.outputs.image_name }}
+          subject-digest: ${{ steps.image.outputs.arm64_digest }}
+          sbom-path: .image-release/rook-image-linux-arm64.spdx.json
           push-to-registry: true
           create-storage-record: false
 
@@ -178,7 +219,8 @@ jobs:
           set -euo pipefail
           common=(--repo "$GITHUB_REPOSITORY" --signer-workflow "$GITHUB_REPOSITORY/.github/workflows/release.yml" --source-ref "$GITHUB_REF" --source-digest "$GITHUB_SHA" --deny-self-hosted-runners --bundle-from-oci)
           gh attestation verify "oci://$IMAGE_REFERENCE" "${common[@]}"
-          gh attestation verify "oci://$IMAGE_REFERENCE" "${common[@]}" --predicate-type https://spdx.dev/Document/v2.3
+          gh attestation verify "oci://${{ steps.image.outputs.amd64_reference }}" "${common[@]}" --predicate-type https://spdx.dev/Document/v2.3
+          gh attestation verify "oci://${{ steps.image.outputs.arm64_reference }}" "${common[@]}" --predicate-type https://spdx.dev/Document/v2.3
 
       - name: Assemble release evidence
         env:
@@ -191,11 +233,17 @@ jobs:
           ROOK_GIT_HEAD: ${{ steps.source.outputs.git_head }}
           ROOK_BUILD_ENV: ${{ steps.source.outputs.build_env }}
           PROVENANCE_BUNDLE: ${{ steps.provenance.outputs.bundle-path }}
-          SBOM_BUNDLE: ${{ steps.sbom-attestation.outputs.bundle-path }}
+          AMD64_DIGEST: ${{ steps.image.outputs.amd64_digest }}
+          AMD64_REFERENCE: ${{ steps.image.outputs.amd64_reference }}
+          AMD64_SBOM_BUNDLE: ${{ steps.sbom-amd64-attestation.outputs.bundle-path }}
+          ARM64_DIGEST: ${{ steps.image.outputs.arm64_digest }}
+          ARM64_REFERENCE: ${{ steps.image.outputs.arm64_reference }}
+          ARM64_SBOM_BUNDLE: ${{ steps.sbom-arm64-attestation.outputs.bundle-path }}
         run: |
           set -euo pipefail
           cp -- "$PROVENANCE_BUNDLE" .image-release/provenance-attestation.json
-          cp -- "$SBOM_BUNDLE" .image-release/sbom-attestation.json
+          cp -- "$AMD64_SBOM_BUNDLE" .image-release/sbom-linux-amd64-attestation.json
+          cp -- "$ARM64_SBOM_BUNDLE" .image-release/sbom-linux-arm64-attestation.json
           jq -n \
             --arg image_name "$IMAGE_NAME" \
             --arg image_reference "$IMAGE_REFERENCE" \
@@ -210,25 +258,32 @@ jobs:
             --arg runtime_ref "$GITHUB_REF" \
             --arg workflow_run "${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}/actions/runs/${GITHUB_RUN_ID}/attempts/${GITHUB_RUN_ATTEMPT}" \
             --arg image_index_sha256 "sha256:$(sha256sum .image-release/image-index.json | cut -d ' ' -f 1)" \
-            --arg sbom_sha256 "sha256:$(sha256sum .image-release/rook-image.spdx.json | cut -d ' ' -f 1)" \
             --arg provenance_sha256 "sha256:$(sha256sum .image-release/provenance-attestation.json | cut -d ' ' -f 1)" \
-            --arg sbom_attestation_sha256 "sha256:$(sha256sum .image-release/sbom-attestation.json | cut -d ' ' -f 1)" \
+            --arg amd64_digest "$AMD64_DIGEST" \
+            --arg amd64_reference "$AMD64_REFERENCE" \
+            --arg amd64_sbom_sha256 "sha256:$(sha256sum .image-release/rook-image-linux-amd64.spdx.json | cut -d ' ' -f 1)" \
+            --arg amd64_sbom_attestation_sha256 "sha256:$(sha256sum .image-release/sbom-linux-amd64-attestation.json | cut -d ' ' -f 1)" \
+            --arg arm64_digest "$ARM64_DIGEST" \
+            --arg arm64_reference "$ARM64_REFERENCE" \
+            --arg arm64_sbom_sha256 "sha256:$(sha256sum .image-release/rook-image-linux-arm64.spdx.json | cut -d ' ' -f 1)" \
+            --arg arm64_sbom_attestation_sha256 "sha256:$(sha256sum .image-release/sbom-linux-arm64-attestation.json | cut -d ' ' -f 1)" \
             '{
-              evidence_version: "1.0.0",
+              evidence_version: "1.1.0",
               image_name: $image_name,
               image_reference: $image_reference,
               image_digest: $image_digest,
               rook_release: {package: $rook_package, version: $rook_version, npm_integrity: $rook_npm_integrity, npm_git_head: $rook_git_head, build_environment: $rook_build_env},
               runtime_source: {repository: $runtime_repository, commit: $runtime_commit, ref: $runtime_ref},
-              platforms: ["linux/amd64", "linux/arm64"],
+              platforms: [
+                {platform: "linux/amd64", image_reference: $amd64_reference, image_digest: $amd64_digest, sbom: {path: "rook-image-linux-amd64.spdx.json", sha256: $amd64_sbom_sha256, predicate_type: "https://spdx.dev/Document/v2.3"}, attestation: {path: "sbom-linux-amd64-attestation.json", sha256: $amd64_sbom_attestation_sha256}},
+                {platform: "linux/arm64", image_reference: $arm64_reference, image_digest: $arm64_digest, sbom: {path: "rook-image-linux-arm64.spdx.json", sha256: $arm64_sbom_sha256, predicate_type: "https://spdx.dev/Document/v2.3"}, attestation: {path: "sbom-linux-arm64-attestation.json", sha256: $arm64_sbom_attestation_sha256}}
+              ],
               image_index: {path: "image-index.json", sha256: $image_index_sha256},
               workflow_run: $workflow_run,
-              sbom: {path: "rook-image.spdx.json", sha256: $sbom_sha256, predicate_type: "https://spdx.dev/Document/v2.3"},
               attestations: {
-                provenance: {path: "provenance-attestation.json", sha256: $provenance_sha256},
-                sbom: {path: "sbom-attestation.json", sha256: $sbom_attestation_sha256}
+                provenance: {path: "provenance-attestation.json", sha256: $provenance_sha256}
               },
-              verification: {source: "ghcr_oci_attestations", provenance: "passed", sbom: "passed"}
+              verification: {source: "ghcr_oci_attestations", provenance: "passed", platform_sboms: "passed"}
             }' > .image-release/image-release-evidence.json
 
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2

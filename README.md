@@ -7,8 +7,9 @@ bounded JSON-RPC fixture client. It contains no benchmark corpus, hidden truth,
 reviewer material, credentials, or private ROOK source.
 
 The release workflow builds from protected `main`, pushes the exact image digest
-to GHCR, generates an SPDX SBOM, and publishes GitHub provenance and SBOM
-attestations. `runtime.json` is the canonical ROOK release identity.
+to GHCR, generates an SPDX SBOM for each amd64 and arm64 child manifest, and
+publishes GitHub provenance plus digest-bound per-platform SBOM attestations.
+`runtime.json` is the canonical ROOK release identity.
 
 ## Local verification
 

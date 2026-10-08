@@ -24,7 +24,7 @@ jobs:
           set -euo pipefail
           npm ci --ignore-scripts --no-audit --no-fund
           node -e 'const lock=require("./package-lock.json").packages["node_modules/@testmuai/rook"]; const spec=require("./runtime.json").rook; if(lock.version!==spec.version||lock.integrity!==spec.npm_integrity) process.exit(1)'
-          node -e 'const w=require("node:fs").readFileSync(".github/workflows/release.yml","utf8"); for(const value of ["platforms: linux/amd64,linux/arm64", "for platform in linux/amd64 linux/arm64", "docker run --rm --platform"]) if(!w.includes(value)) process.exit(1)'
+          node -e 'const w=require("node:fs").readFileSync(".github/workflows/release.yml","utf8"); for(const value of ["platforms: linux/amd64,linux/arm64", "for platform in linux/amd64 linux/arm64", "docker run --rm --platform", "rook-image-linux-amd64.spdx.json", "rook-image-linux-arm64.spdx.json", "steps.image.outputs.amd64_digest", "steps.image.outputs.arm64_digest"]) if(!w.includes(value)) process.exit(1)'
       - name: Build and smoke-test image
         run: |
           set -euo pipefail
