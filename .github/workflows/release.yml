@@ -33,6 +33,10 @@ jobs:
       - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
         with:
           node-version: 22
+      - uses: docker/setup-qemu-action@99012661954931238ded8c8b007157a8430204e1 # v4.4.0
+        with:
+          platforms: amd64,arm64
+      - uses: docker/setup-buildx-action@f87e5991a6d7451dcb8d9637bfbc97413f497069 # v4.4.1
 
       - name: Enforce protected source and resolve release identity
         id: source
@@ -78,36 +82,39 @@ jobs:
           GHCR_TOKEN: ${{ github.token }}
         run: echo "$GHCR_TOKEN" | docker login ghcr.io --username "$GITHUB_ACTOR" --password-stdin
 
-      - name: Build image from pinned public release
-        env:
-          ROOK_VERSION: ${{ steps.source.outputs.version }}
-          ROOK_NPM_INTEGRITY: ${{ steps.source.outputs.integrity }}
-          ROOK_GIT_HEAD: ${{ steps.source.outputs.git_head }}
-          ROOK_BUILD_ENV: ${{ steps.source.outputs.build_env }}
-          IMAGE_TAG: ${{ steps.source.outputs.image_tag }}
-        run: |
-          set -euo pipefail
-          mkdir .image-release
-          docker build --pull=false \
-            --build-arg "ROOK_VERSION=$ROOK_VERSION" \
-            --build-arg "ROOK_NPM_INTEGRITY=$ROOK_NPM_INTEGRITY" \
-            --build-arg "ROOK_GIT_HEAD=$ROOK_GIT_HEAD" \
-            --build-arg "ROOK_BUILD_ENV=$ROOK_BUILD_ENV" \
-            -t "$IMAGE_TAG" .
+      - name: Prepare release evidence directory
+        run: mkdir .image-release
 
-      - name: Push and resolve registry digest
+      - name: Build and push multi-architecture image from pinned public release
+        id: build
+        uses: docker/build-push-action@c3c9e263c25d99ce0380d002d59b67737d91b0dc # v7.4.0
+        with:
+          context: .
+          push: true
+          tags: ${{ steps.source.outputs.image_tag }}
+          platforms: linux/amd64,linux/arm64
+          pull: false
+          provenance: false
+          sbom: false
+          build-args: |
+            ROOK_VERSION=${{ steps.source.outputs.version }}
+            ROOK_NPM_INTEGRITY=${{ steps.source.outputs.integrity }}
+            ROOK_GIT_HEAD=${{ steps.source.outputs.git_head }}
+            ROOK_BUILD_ENV=${{ steps.source.outputs.build_env }}
+
+      - name: Resolve registry digest and verify platform index
         id: image
         env:
           IMAGE_NAME: ${{ steps.source.outputs.image_name }}
-          IMAGE_TAG: ${{ steps.source.outputs.image_tag }}
+          IMAGE_DIGEST: ${{ steps.build.outputs.digest }}
         run: |
           set -euo pipefail
-          docker push "$IMAGE_TAG"
-          reference="$(docker image inspect "$IMAGE_TAG" --format '{{index .RepoDigests 0}}')"
-          digest="${reference#"$IMAGE_NAME"@}"
+          digest="$IMAGE_DIGEST"
+          reference="$IMAGE_NAME@$digest"
           test "$reference" = "$IMAGE_NAME@$digest"
           [[ "$digest" =~ ^sha256:[0-9a-f]{64}$ ]]
-          docker pull "$reference"
+          docker buildx imagetools inspect "$reference" --raw > .image-release/image-index.json
+          test "$(jq -c '[.manifests[].platform | "\(.os)/\(.architecture)"] | sort' .image-release/image-index.json)" = '["linux/amd64","linux/arm64"]'
           {
             echo "digest=$digest"
             echo "reference=$reference"
@@ -122,11 +129,17 @@ jobs:
           ROOK_BUILD_ENV: ${{ steps.source.outputs.build_env }}
         run: |
           set -euo pipefail
-          test "$(docker image inspect "$IMAGE_REFERENCE" --format '{{index .Config.Labels "org.opencontainers.image.version"}}')" = "$ROOK_VERSION"
-          test "$(docker image inspect "$IMAGE_REFERENCE" --format '{{index .Config.Labels "org.opencontainers.image.revision"}}')" = "$ROOK_GIT_HEAD"
-          test "$(docker image inspect "$IMAGE_REFERENCE" --format '{{index .Config.Labels "ai.rook.benchmark.npm-integrity"}}')" = "$ROOK_NPM_INTEGRITY"
-          test "$(docker image inspect "$IMAGE_REFERENCE" --format '{{index .Config.Labels "ai.rook.benchmark.environment"}}')" = "$ROOK_BUILD_ENV"
-          test "$(docker run --rm --network none --read-only --tmpfs /tmp "$IMAGE_REFERENCE" --version)" = "$ROOK_VERSION"
+          for platform in linux/amd64 linux/arm64; do
+            architecture="${platform#linux/}"
+            child_digest="$(jq -er --arg architecture "$architecture" '.manifests[] | select(.platform.os == "linux" and .platform.architecture == $architecture) | .digest' .image-release/image-index.json)"
+            child_reference="${IMAGE_REFERENCE%@*}@$child_digest"
+            docker pull --platform "$platform" "$child_reference"
+            test "$(docker image inspect "$child_reference" --format '{{index .Config.Labels "org.opencontainers.image.version"}}')" = "$ROOK_VERSION"
+            test "$(docker image inspect "$child_reference" --format '{{index .Config.Labels "org.opencontainers.image.revision"}}')" = "$ROOK_GIT_HEAD"
+            test "$(docker image inspect "$child_reference" --format '{{index .Config.Labels "ai.rook.benchmark.npm-integrity"}}')" = "$ROOK_NPM_INTEGRITY"
+            test "$(docker image inspect "$child_reference" --format '{{index .Config.Labels "ai.rook.benchmark.environment"}}')" = "$ROOK_BUILD_ENV"
+            test "$(docker run --rm --platform "$platform" --network none --read-only --tmpfs /tmp "$child_reference" --version)" = "$ROOK_VERSION"
+          done
 
       - name: Generate SPDX SBOM
         uses: anchore/sbom-action@e22c389904149dbc22b58101806040fa8d37a610 # v0.24.3
@@ -196,6 +209,7 @@ jobs:
             --arg runtime_commit "$GITHUB_SHA" \
             --arg runtime_ref "$GITHUB_REF" \
             --arg workflow_run "${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}/actions/runs/${GITHUB_RUN_ID}/attempts/${GITHUB_RUN_ATTEMPT}" \
+            --arg image_index_sha256 "sha256:$(sha256sum .image-release/image-index.json | cut -d ' ' -f 1)" \
             --arg sbom_sha256 "sha256:$(sha256sum .image-release/rook-image.spdx.json | cut -d ' ' -f 1)" \
             --arg provenance_sha256 "sha256:$(sha256sum .image-release/provenance-attestation.json | cut -d ' ' -f 1)" \
             --arg sbom_attestation_sha256 "sha256:$(sha256sum .image-release/sbom-attestation.json | cut -d ' ' -f 1)" \
@@ -206,6 +220,8 @@ jobs:
               image_digest: $image_digest,
               rook_release: {package: $rook_package, version: $rook_version, npm_integrity: $rook_npm_integrity, npm_git_head: $rook_git_head, build_environment: $rook_build_env},
               runtime_source: {repository: $runtime_repository, commit: $runtime_commit, ref: $runtime_ref},
+              platforms: ["linux/amd64", "linux/arm64"],
+              image_index: {path: "image-index.json", sha256: $image_index_sha256},
               workflow_run: $workflow_run,
               sbom: {path: "rook-image.spdx.json", sha256: $sbom_sha256, predicate_type: "https://spdx.dev/Document/v2.3"},
               attestations: {
