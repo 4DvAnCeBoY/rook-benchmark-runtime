@@ -23,8 +23,7 @@ jobs:
         run: |
           set -euo pipefail
           npm ci --ignore-scripts --no-audit --no-fund
-          test "$(node -p \"require('./package-lock.json').packages['node_modules/@testmuai/rook'].version\")" = "$(jq -r '.rook.version' runtime.json)"
-          test "$(node -p \"require('./package-lock.json').packages['node_modules/@testmuai/rook'].integrity\")" = "$(jq -r '.rook.npm_integrity' runtime.json)"
+          node -e 'const lock=require("./package-lock.json").packages["node_modules/@testmuai/rook"]; const spec=require("./runtime.json").rook; if(lock.version!==spec.version||lock.integrity!==spec.npm_integrity) process.exit(1)'
       - name: Build and smoke-test image
         run: |
           set -euo pipefail
@@ -34,4 +33,4 @@ jobs:
             --build-arg "ROOK_GIT_HEAD=$(jq -r '.rook.npm_git_head' runtime.json)" \
             --build-arg "ROOK_BUILD_ENV=$(jq -r '.rook.build_environment' runtime.json)" \
             -t rook-benchmark-runtime:ci .
-          test "$(docker run --rm --network none --read-only --tmpfs /tmp rook-benchmark-runtime:ci --version)" = "$(jq -r '.rook.version' runtime.json)"
+          docker run --rm --network none --read-only --tmpfs /tmp rook-benchmark-runtime:ci --version | diff - <(jq -r '.rook.version' runtime.json)
