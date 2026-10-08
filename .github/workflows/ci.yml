@@ -1,0 +1,37 @@
+name: ci
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+
+permissions:
+  contents: read
+
+jobs:
+  validate:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: 22
+      - name: Verify lock and runtime identity
+        run: |
+          set -euo pipefail
+          npm ci --ignore-scripts --no-audit --no-fund
+          test "$(node -p \"require('./package-lock.json').packages['node_modules/@testmuai/rook'].version\")" = "$(jq -r '.rook.version' runtime.json)"
+          test "$(node -p \"require('./package-lock.json').packages['node_modules/@testmuai/rook'].integrity\")" = "$(jq -r '.rook.npm_integrity' runtime.json)"
+      - name: Build and smoke-test image
+        run: |
+          set -euo pipefail
+          docker build --pull=false \
+            --build-arg "ROOK_VERSION=$(jq -r '.rook.version' runtime.json)" \
+            --build-arg "ROOK_NPM_INTEGRITY=$(jq -r '.rook.npm_integrity' runtime.json)" \
+            --build-arg "ROOK_GIT_HEAD=$(jq -r '.rook.npm_git_head' runtime.json)" \
+            --build-arg "ROOK_BUILD_ENV=$(jq -r '.rook.build_environment' runtime.json)" \
+            -t rook-benchmark-runtime:ci .
+          test "$(docker run --rm --network none --read-only --tmpfs /tmp rook-benchmark-runtime:ci --version)" = "$(jq -r '.rook.version' runtime.json)"

@@ -1,0 +1,12 @@
+{
+  "runtime_version": "1.0.0",
+  "rook": {
+    "package": "@testmuai/rook",
+    "version": "0.1.6",
+    "npm_integrity": "sha512-xgDIHBBx8Amv1IJ72THIC85AzxIST96xTzOc9LcRw6Ik54eDn6sXwi8lwbpWG46ff0hb796Xshgigyt4m0cGKw==",
+    "npm_git_head": "6e3598468dbd0c63cb598cd33dd0cf6087d01b70",
+    "source_repository": "https://github.com/LambdaTest/rook",
+    "release_url": "https://github.com/LambdaTest/rook/releases/tag/v0.1.6",
+    "build_environment": "prod"
+  }
+}

@@ -1,0 +1,10 @@
+{
+  "name": "rook-benchmark-runtime-builder",
+  "version": "1.0.0",
+  "private": true,
+  "description": "Reproducible public runtime image for the ROOK benchmark",
+  "license": "UNLICENSED",
+  "dependencies": {
+    "@testmuai/rook": "0.1.6"
+  }
+}
